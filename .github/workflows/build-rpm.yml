@@ -1,0 +1,73 @@
+name: Build RPM
+
+permissions:
+  contents: none
+  id-token: none
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build base RPM builder image
+        run: |
+          docker build -t localhost/rpm-builder -f rpm-builder.Containerfile .
+
+      - name: Build incus-ui-builder image
+        run: |
+          docker build -t incus-ui-builder -f incus-ui-builder.Containerfile .
+
+      - name: Create directories for RPM build
+        run: |
+          mkdir -p SOURCES SPECS OUTPUT BUILD
+          # Ensure container user (UID 1000) can write to these volumes
+          chmod -R a+rwX SOURCES SPECS OUTPUT BUILD
+
+      - name: Run RPM build
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/SOURCES:/rpmbuild/SOURCES:z \
+            -v ${{ github.workspace }}/SPECS:/rpmbuild/SPECS:z \
+            -v ${{ github.workspace }}/OUTPUT:/rpmbuild/OUTPUT:z \
+            -v ${{ github.workspace }}/BUILD:/rpmbuild/BUILD:z \
+            incus-ui-builder \
+            /bin/bash -c "spectool -g -R /rpmbuild/SPECS/incus-ui.spec && rpmbuild -bb /rpmbuild/SPECS/incus-ui.spec"
+
+      - name: Generate checksums
+        run: |
+          # Ensure the runner user can write to the OUTPUT directory
+          sudo chown -R $(id -u):$(id -g) OUTPUT
+          cd OUTPUT/noarch/
+          sha256sum incus-ui-*.rpm > checksums.txt
+
+      - name: Attest build artifacts
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: 'OUTPUT/noarch/incus-ui-*.rpm'
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: incus-ui-rpm
+          path: |
+            OUTPUT/noarch/incus-ui-*.rpm
+            OUTPUT/noarch/checksums.txt
+
